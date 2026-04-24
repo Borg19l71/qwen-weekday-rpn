@@ -3,392 +3,327 @@
 RPN Expression Search Program
 Searches for RPN expressions that produce the same result as (yy + yy//4) % 7
 for all yy in range 0..99, using increasing complexity (number of tokens).
+Optimized for performance with caching, early termination, and efficient data structures.
 """
 
 from itertools import product
 from typing import List, Tuple, Optional, Union, Callable
 import sys
 import time
+from functools import lru_cache
 
-# Target function: (yy + yy//4) % 7
-def target_function(yy: int) -> int:
-    return (yy + yy // 4) % 7
+# Target function: (yy + yy//4) % 7 - precompute all values
+TARGET_VALUES = tuple((yy + yy // 4) % 7 for yy in range(100))
 
-# Token types
-class TokenType:
-    CONST = 'CONST'      # Integer constant 0..20
-    VAR_YY = 'VAR_YY'    # Variable yy
-    VAR_A = 'VAR_A'      # Variable a (tens digit)
-    VAR_B = 'VAR_B'      # Variable b (ones digit)
-    UNARY_MINUS = 'UNARY_MINUS'
-    BINARY_OP = 'BINARY_OP'
-    IF_THEN_ELSE = 'IF_THEN_ELSE'
-    IF_THEN = 'IF_THEN'  # IF-THEN without ELSE (returns 0 if condition is false)
+# Critical test values for early rejection (indices into TARGET_VALUES)
+CRITICAL_INDICES = (0, 3, 4, 7, 8, 11, 15, 19, 20, 39, 40, 59, 60, 79, 80, 99)
 
-class Token:
-    def __init__(self, token_type: str, value: Optional[Union[str, int]] = None):
-        self.token_type = token_type
-        self.value = value
-    
-    def __repr__(self):
-        if self.value is not None:
-            return f"Token({self.token_type}, {self.value})"
-        return f"Token({self.token_type})"
+# Precompute variable values for all yy
+YY_VALUES = tuple(range(100))
+A_VALUES = tuple(yy // 10 for yy in range(100))
+B_VALUES = tuple(yy % 10 for yy in range(100))
+
+# Token types - use integers for faster comparison
+CONST = 0
+VAR_YY = 1
+VAR_A = 2
+VAR_B = 3
+UNARY_MINUS = 4
+BINARY_OP = 5
+IF_THEN_ELSE = 6
+IF_THEN = 7
+
+# Binary operations as integer codes for faster dispatch
+OP_ADD = 0
+OP_SUB = 1
+OP_MUL = 2
+OP_DIV = 3
+OP_MOD = 4
 
 def get_variables(yy: int) -> Tuple[int, int, int]:
     """Extract yy, a, b from yy value."""
-    a = yy // 10
-    b = yy % 10
-    return yy, a, b
+    return YY_VALUES[yy], A_VALUES[yy], B_VALUES[yy]
 
-def evaluate_rpn(tokens: List[Token], yy: int) -> Optional[int]:
+# Use simple tuple-based tokens for performance: (type, value)
+# This avoids object overhead during evaluation
+
+def create_token(token_type: int, value=None):
+    """Create a token as a simple tuple."""
+    return (token_type, value)
+
+def token_type(token):
+    """Get token type."""
+    return token[0]
+
+def token_value(token):
+    """Get token value."""
+    return token[1]
+
+def evaluate_rpn(tokens, yy: int) -> Optional[int]:
     """
-    Evaluate RPN expression for given yy value.
+    Evaluate RPN expression for given yy value using tuple-based tokens.
     Returns None if evaluation fails (stack underflow, division by zero, etc.)
     or if final stack doesn't have exactly one value.
-    Optimized for speed with local variable caching and minimal lookups.
+    Optimized for speed with direct tuple unpacking and precomputed values.
     """
     stack = []
-    yy_val, a, b = get_variables(yy)
+    yy_val = YY_VALUES[yy]
+    a = A_VALUES[yy]
+    b = B_VALUES[yy]
     
-    # Cache token attributes to avoid repeated attribute lookups
-    for token in tokens:
-        ttype = token.token_type
-        tval = token.value
-        
-        if ttype == 'CONST':
+    for ttype, tval in tokens:
+        if ttype == CONST:
             stack.append(tval)
-        elif ttype == 'VAR_YY':
+        elif ttype == VAR_YY:
             stack.append(yy_val)
-        elif ttype == 'VAR_A':
+        elif ttype == VAR_A:
             stack.append(a)
-        elif ttype == 'VAR_B':
+        elif ttype == VAR_B:
             stack.append(b)
-        elif ttype == 'UNARY_MINUS':
-            if len(stack) < 1:
+        elif ttype == UNARY_MINUS:
+            if not stack:
                 return None
             stack[-1] = -stack[-1]
-        elif ttype == 'BINARY_OP':
+        elif ttype == BINARY_OP:
             if len(stack) < 2:
                 return None
             b_val = stack.pop()
             a_val = stack.pop()
             
-            if tval == '+':
+            if tval == OP_ADD:
                 stack.append(a_val + b_val)
-            elif tval == '-':
+            elif tval == OP_SUB:
                 stack.append(a_val - b_val)
-            elif tval == '*':
+            elif tval == OP_MUL:
                 stack.append(a_val * b_val)
-            elif tval == '//':
+            elif tval == OP_DIV:
                 if b_val == 0:
                     return None
                 stack.append(a_val // b_val)
-            elif tval == '%':
+            elif tval == OP_MOD:
                 if b_val == 0:
                     return None
                 stack.append(a_val % b_val)
-        elif ttype == 'IF_THEN_ELSE':
-            # Format: IF (condition_tokens) THEN (then_tokens) ELSE (else_tokens)
-            # The token value contains nested token lists
-            cond_tokens, then_tokens, else_tokens = token.value
-            
-            # Evaluate condition (must produce exactly one value)
-            cond_stack = stack.copy()
-            cond_result = evaluate_rpn_internal(cond_tokens, yy, cond_stack)
+        elif ttype == IF_THEN_ELSE:
+            cond_tokens, then_tokens, else_tokens = tval
+            cond_result = _eval_fast(cond_tokens, yy, stack.copy())
             if cond_result is None:
                 return None
-            
-            # In Python, any non-zero value is truthy
             if cond_result != 0:
-                branch_result = evaluate_rpn_internal(then_tokens, yy, stack)
+                result = _eval_fast(then_tokens, yy, stack)
             else:
-                branch_result = evaluate_rpn_internal(else_tokens, yy, stack)
-            
-            if branch_result is None:
+                result = _eval_fast(else_tokens, yy, stack)
+            if result is None:
                 return None
-            # Branch result should be the top of stack after evaluation
-            # The branch replaces the condition value(s) with its own output
-        elif ttype == 'IF_THEN':
-            # Format: IF (condition_tokens) THEN (then_tokens)
-            # If condition is true: execute then_branch
-            # If condition is false: do NOTHING (no stack change)
-            cond_tokens, then_tokens = token.value
-            
-            # Save current stack state
-            saved_stack = stack.copy()
-            
-            # Evaluate condition on a copy to check validity
-            cond_stack = stack.copy()
-            cond_result = evaluate_rpn_internal(cond_tokens, yy, cond_stack)
+        elif ttype == IF_THEN:
+            cond_tokens, then_tokens = tval
+            cond_result = _eval_fast(cond_tokens, yy, stack.copy())
             if cond_result is None:
                 return None
-            
-            # In Python, any non-zero value is truthy
             if cond_result != 0:
-                # Condition is true - execute then branch
-                # Restore original stack before executing then branch
-                branch_result = evaluate_rpn_internal(then_tokens, yy, stack)
-                if branch_result is None:
+                result = _eval_fast(then_tokens, yy, stack)
+                if result is None:
                     return None
-                # Then branch result is now on stack
-            # else: condition is false - restore original stack (already there)
     
     if len(stack) != 1:
         return None
     
     return stack[0]
 
-def evaluate_rpn_internal(tokens: List[Token], yy: int, stack: List[int]) -> Optional[int]:
+def _eval_fast(tokens, yy: int, stack: list) -> Optional[int]:
     """
-    Internal RPN evaluation that works on an existing stack.
+    Fast internal RPN evaluation that works on an existing stack.
+    Uses tuple-based tokens and precomputed variable values.
     Returns the top of stack after evaluation, or None if failed.
     """
-    yy_val, a, b = get_variables(yy)
+    yy_val = YY_VALUES[yy]
+    a = A_VALUES[yy]
+    b = B_VALUES[yy]
     
-    for token in tokens:
-        if token.token_type == TokenType.CONST:
-            stack.append(token.value)
-        elif token.token_type == TokenType.VAR_YY:
+    for ttype, tval in tokens:
+        if ttype == CONST:
+            stack.append(tval)
+        elif ttype == VAR_YY:
             stack.append(yy_val)
-        elif token.token_type == TokenType.VAR_A:
+        elif ttype == VAR_A:
             stack.append(a)
-        elif token.token_type == TokenType.VAR_B:
+        elif ttype == VAR_B:
             stack.append(b)
-        elif token.token_type == TokenType.UNARY_MINUS:
-            if len(stack) < 1:
+        elif ttype == UNARY_MINUS:
+            if not stack:
                 return None
-            val = stack.pop()
-            stack.append(-val)
-        elif token.token_type == TokenType.BINARY_OP:
+            stack.append(-stack.pop())
+        elif ttype == BINARY_OP:
             if len(stack) < 2:
                 return None
             b_val = stack.pop()
             a_val = stack.pop()
-            op = token.value
             
-            try:
-                if op == '+':
-                    stack.append(a_val + b_val)
-                elif op == '-':
-                    stack.append(a_val - b_val)
-                elif op == '*':
-                    stack.append(a_val * b_val)
-                elif op == '//':
-                    if b_val == 0:
-                        return None
-                    stack.append(a_val // b_val)
-                elif op == '%':
-                    if b_val == 0:
-                        return None
-                    stack.append(a_val % b_val)
-            except (ZeroDivisionError, OverflowError):
-                return None
-        elif token.token_type == TokenType.IF_THEN_ELSE:
-            cond_tokens, then_tokens, else_tokens = token.value
-            
-            cond_result = evaluate_rpn_internal(cond_tokens, yy, stack)
-            if cond_result is None:
-                return None
-            
-            if cond_result != 0:
-                branch_result = evaluate_rpn_internal(then_tokens, yy, stack)
-            else:
-                branch_result = evaluate_rpn_internal(else_tokens, yy, stack)
-            
-            if branch_result is None:
-                return None
-        elif token.token_type == TokenType.IF_THEN:
-            cond_tokens, then_tokens = token.value
-            
-            saved_stack = stack.copy()
-            cond_result = evaluate_rpn_internal(cond_tokens, yy, stack)
-            if cond_result is None:
-                return None
-            
-            if cond_result != 0:
-                branch_result = evaluate_rpn_internal(then_tokens, yy, stack)
-                if branch_result is None:
+            if tval == OP_ADD:
+                stack.append(a_val + b_val)
+            elif tval == OP_SUB:
+                stack.append(a_val - b_val)
+            elif tval == OP_MUL:
+                stack.append(a_val * b_val)
+            elif tval == OP_DIV:
+                if b_val == 0:
                     return None
-            # else: false - stack already restored conceptually (we didn't modify it yet)
+                stack.append(a_val // b_val)
+            elif tval == OP_MOD:
+                if b_val == 0:
+                    return None
+                stack.append(a_val % b_val)
+        elif ttype == IF_THEN_ELSE:
+            cond_tokens, then_tokens, else_tokens = tval
+            cond_result = _eval_fast(cond_tokens, yy, stack)
+            if cond_result is None:
+                return None
+            if cond_result != 0:
+                result = _eval_fast(then_tokens, yy, stack)
+            else:
+                result = _eval_fast(else_tokens, yy, stack)
+            if result is None:
+                return None
+        elif ttype == IF_THEN:
+            cond_tokens, then_tokens = tval
+            saved_len = len(stack)
+            cond_result = _eval_fast(cond_tokens, yy, stack)
+            if cond_result is None:
+                return None
+            if cond_result != 0:
+                result = _eval_fast(then_tokens, yy, stack)
+                if result is None:
+                    return None
+            else:
+                # Restore stack to state before condition evaluation
+                while len(stack) > saved_len:
+                    stack.pop()
     
-    if len(stack) < 1:
+    if not stack:
         return None
     
     return stack[-1]
 
 def generate_simple_tokens():
-    """Generate simple tokens (constants and variables)."""
-    tokens = []
-    
+    """Generate simple tokens (constants and variables) as tuples."""
     # Constants 0..20
-    for i in range(21):
-        tokens.append(Token(TokenType.CONST, i))
-    
+    tokens = [(CONST, i) for i in range(21)]
     # Variables
-    tokens.append(Token(TokenType.VAR_YY))
-    tokens.append(Token(TokenType.VAR_A))
-    tokens.append(Token(TokenType.VAR_B))
-    
+    tokens.append((VAR_YY, None))
+    tokens.append((VAR_A, None))
+    tokens.append((VAR_B, None))
     return tokens
 
 def generate_unary_tokens():
-    """Generate unary minus token."""
-    return [Token(TokenType.UNARY_MINUS)]
+    """Generate unary minus token as tuple."""
+    return [(UNARY_MINUS, None)]
 
 def generate_binary_ops():
-    """Generate binary operation tokens."""
-    ops = ['+', '-', '*', '//', '%']
-    return [Token(TokenType.BINARY_OP, op) for op in ops]
+    """Generate binary operation tokens as tuples with integer codes."""
+    return [(BINARY_OP, op) for op in range(5)]  # OP_ADD=0, OP_SUB=1, OP_MUL=2, OP_DIV=3, OP_MOD=4
 
-def get_stack_effect(tokens: List[Token]) -> Optional[int]:
+def get_stack_effect(tokens) -> Optional[int]:
     """
     Calculate the net stack effect of a token sequence.
     Returns None if the sequence is invalid.
     Positive means values pushed, negative means values popped.
+    Uses tuple-based tokens for performance.
     """
     stack_size = 0
-    min_stack_size = 0
     
-    for token in tokens:
-        if token.token_type in [TokenType.CONST, TokenType.VAR_YY, TokenType.VAR_A, TokenType.VAR_B]:
+    for ttype, tval in tokens:
+        if ttype in (CONST, VAR_YY, VAR_A, VAR_B):
             stack_size += 1
-        elif token.token_type == TokenType.UNARY_MINUS:
+        elif ttype == UNARY_MINUS:
             if stack_size < 1:
                 return None
-            # Consumes 1, produces 1, net effect 0
-        elif token.token_type == TokenType.BINARY_OP:
+        elif ttype == BINARY_OP:
             if stack_size < 2:
                 return None
-            stack_size -= 1  # Consumes 2, produces 1, net effect -1
-        elif token.token_type == TokenType.IF_THEN_ELSE:
-            cond_tokens, then_tokens, else_tokens = token.value
+            stack_size -= 1
+        elif ttype == IF_THEN_ELSE:
+            cond_tokens, then_tokens, else_tokens = tval
             cond_effect = get_stack_effect(cond_tokens)
             then_effect = get_stack_effect(then_tokens)
             else_effect = get_stack_effect(else_tokens)
             
             if cond_effect is None or then_effect is None or else_effect is None:
                 return None
-            
-            # Condition must leave exactly one value on stack
             if cond_effect != 1:
                 return None
-            
-            # THEN and ELSE must have the same stack effect
             if then_effect != else_effect:
                 return None
-            
-            # Net effect: condition consumes nothing from outer, produces 1
-            # Then branch replaces that 1 with then_effect values
-            # So net effect is then_effect
             stack_size += then_effect
-        elif token.token_type == TokenType.IF_THEN:
-            cond_tokens, then_tokens = token.value
+        elif ttype == IF_THEN:
+            cond_tokens, then_tokens = tval
             cond_effect = get_stack_effect(cond_tokens)
             then_effect = get_stack_effect(then_tokens)
             
             if cond_effect is None or then_effect is None:
                 return None
-            
-            # Condition must leave exactly one value on stack
             if cond_effect != 1:
                 return None
-            
-            # IF-THEN: if true, pushes then_effect values; if false, no change (effect 0)
-            # For validation, we consider the maximum possible effect
-            # But actually we need to ensure the expression is valid in both cases
-            # The net effect when true is then_effect, when false is 0
-            # We'll track this specially - for now just check validity
-            pass  # IF-THEN doesn't have a fixed stack effect
     
     return stack_size
 
-def is_valid_rpn_sequence(tokens: List[Token], allow_multi_result: bool = False) -> bool:
+def is_valid_rpn_sequence(tokens, allow_multi_result: bool = False) -> bool:
     """
     Check if a token sequence can form a valid RPN expression.
-    Uses stack-based validation.
-    
-    Args:
-        tokens: List of tokens to validate
-        allow_multi_result: If True, allows final stack size > 1 (used for IF branch validation)
-    
-    For simple expressions (no IF-THEN), final stack must be exactly 1.
-    For IF-THEN expressions, final stack can be >= 0 depending on condition.
-    For IF branches being validated internally, any stack size >= 0 is allowed.
+    Uses stack-based validation with tuple-based tokens.
     """
     stack_size = 0
     
-    for token in tokens:
-        if token.token_type in [TokenType.CONST, TokenType.VAR_YY, TokenType.VAR_A, TokenType.VAR_B]:
+    for ttype, tval in tokens:
+        if ttype in (CONST, VAR_YY, VAR_A, VAR_B):
             stack_size += 1
-        elif token.token_type == TokenType.UNARY_MINUS:
+        elif ttype == UNARY_MINUS:
             if stack_size < 1:
                 return False
-            # Consumes 1, produces 1
-        elif token.token_type == TokenType.BINARY_OP:
+        elif ttype == BINARY_OP:
             if stack_size < 2:
                 return False
-            stack_size -= 1  # Consumes 2, produces 1
-        elif token.token_type == TokenType.IF_THEN_ELSE:
-            # IF THEN ELSE consumes nothing from outer stack, produces result of branches
-            cond_tokens, then_tokens, else_tokens = token.value
+            stack_size -= 1
+        elif ttype == IF_THEN_ELSE:
+            cond_tokens, then_tokens, else_tokens = tval
             if not is_valid_rpn_sequence(cond_tokens):
                 return False
-            # Branches can have multi-result
             if not is_valid_rpn_sequence(then_tokens, allow_multi_result=True):
                 return False
             if not is_valid_rpn_sequence(else_tokens, allow_multi_result=True):
                 return False
             
-            # Get stack effects of branches
             then_effect = get_stack_effect(then_tokens)
             else_effect = get_stack_effect(else_tokens)
             
-            # Both branches must be valid and have same effect
             if then_effect is None or else_effect is None:
                 return False
             if then_effect != else_effect:
                 return False
-            
-            # Each branch must leave at least one value (for the overall expression to produce output)
             if then_effect < 1:
                 return False
                 
             stack_size += then_effect
-        elif token.token_type == TokenType.IF_THEN:
-            # IF THEN (without ELSE)
-            cond_tokens, then_tokens = token.value
+        elif ttype == IF_THEN:
+            cond_tokens, then_tokens = tval
             if not is_valid_rpn_sequence(cond_tokens):
                 return False
-            # Then branch can have multi-result
             if not is_valid_rpn_sequence(then_tokens, allow_multi_result=True):
                 return False
             
-            # Condition must produce exactly one value
             cond_effect = get_stack_effect(cond_tokens)
             if cond_effect is None or cond_effect != 1:
                 return False
             
-            # Then branch can have any non-negative effect
             then_effect = get_stack_effect(then_tokens)
             if then_effect is None or then_effect < 0:
                 return False
-            
-            # IF-THEN doesn't guarantee a fixed stack size since false case = no change
-            # We don't add anything to stack_size here
-            pass
     
-    # For expressions without IF-THEN, must end with exactly 1 value (unless allow_multi_result)
-    # For expressions with IF-THEN or IF-THEN-ELSE, we need special handling
-    has_if_then = any(t.token_type == TokenType.IF_THEN for t in tokens)
-    has_if_then_else = any(t.token_type == TokenType.IF_THEN_ELSE for t in tokens)
+    has_if_then = any(t[0] == IF_THEN for t in tokens)
+    has_if_then_else = any(t[0] == IF_THEN_ELSE for t in tokens)
     
     if has_if_then or has_if_then_else:
-        # IF expressions are valid if they don't underflow
-        # The actual result depends on runtime condition
         return True
     elif allow_multi_result:
-        # Allow any non-negative stack size
         return stack_size >= 0
     else:
         return stack_size == 1
@@ -451,30 +386,27 @@ def generate_rpn_expressions(num_tokens: int, use_if_then_else: bool = False):
 def generate_all_rpn_with_if(max_tokens: int):
     """
     Generate RPN expressions including IF-THEN-ELSE structures.
-    Uses a different approach: generate base expressions first, then combine with IF.
+    Uses iterative generation to avoid memory issues.
+    Optimized with precomputed token lists and efficient evaluation.
     """
     simple_tokens = generate_simple_tokens()
     unary_tokens = generate_unary_tokens()
     binary_ops = generate_binary_ops()
     
-    # Cache expressions by token count
+    # Cache expressions by token count - but clear older levels to save memory
     cache = {}
     
-    def get_expressions(n: int, allow_if: bool) -> List[List[Token]]:
-        if n in cache and cache[n][0] == allow_if:
-            return cache[n][1]
+    def get_expressions(n: int, allow_if: bool):
+        key = (n, allow_if)
+        if key in cache:
+            return cache[key]
         
         exprs = []
         
         if n == 1:
-            for token in simple_tokens:
-                exprs.append([token])
+            exprs = [[t] for t in simple_tokens]
         elif n == 2:
-            # Simple + unary
-            for simple in simple_tokens:
-                for unary in unary_tokens:
-                    exprs.append([simple, unary])
-            # Also check binary with constants (but need 3 tokens minimum for binary)
+            exprs = [[simple, unary] for simple in simple_tokens for unary in unary_tokens]
         else:
             # Binary operations
             for k in range(1, n):
@@ -496,47 +428,37 @@ def generate_all_rpn_with_if(max_tokens: int):
                     exprs.append(expr + [unary])
             
             # IF-THEN-ELSE structures
-            if allow_if and n >= 5:  # Minimum: 1 cond + 1 then + 1 else + structure overhead
-                # IF THEN ELSE takes 1 token itself, plus tokens for each branch
-                # Total = cond_tokens + then_tokens + else_tokens + 1 (for IF token)
-                # So: cond + then + else = n - 1
+            if allow_if and n >= 5:
                 for cond_size in range(1, n - 2):
                     for then_size in range(1, n - cond_size - 1):
                         else_size = n - 1 - cond_size - then_size
                         if else_size < 1:
                             continue
                         
-                        cond_exprs = get_expressions(cond_size, False)  # No nesting for now
+                        cond_exprs = get_expressions(cond_size, False)
                         then_exprs = get_expressions(then_size, False)
                         else_exprs = get_expressions(else_size, False)
                         
                         for ce in cond_exprs:
                             for te in then_exprs:
                                 for ee in else_exprs:
-                                    if_token = Token(TokenType.IF_THEN_ELSE, (ce, te, ee))
-                                    exprs.append([if_token])
+                                    exprs.append([(IF_THEN_ELSE, (ce, te, ee))])
             
             # IF-THEN (without ELSE) structures
-            if allow_if and n >= 4:  # Minimum: 1 cond + 1 then + structure overhead
-                # IF THEN takes 1 token itself, plus tokens for condition and then branch
-                # Total = cond_tokens + then_tokens + 1 (for IF token)
-                # So: cond + then = n - 1
+            if allow_if and n >= 4:
                 for cond_size in range(1, n - 1):
                     then_size = n - 1 - cond_size
                     if then_size < 1:
                         continue
                     
-                    cond_exprs = get_expressions(cond_size, False)  # No nesting for now
+                    cond_exprs = get_expressions(cond_size, False)
                     then_exprs = get_expressions(then_size, False)
                     
                     for ce in cond_exprs:
                         for te in then_exprs:
-                            if_token = Token(TokenType.IF_THEN, (ce, te))
-                            exprs.append([if_token])
+                            exprs.append([(IF_THEN, (ce, te))])
         
-        if n not in cache or cache[n][0] != allow_if:
-            cache[n] = (allow_if, exprs)
-        
+        cache[key] = exprs
         return exprs
     
     for n in range(1, max_tokens + 1):
@@ -544,77 +466,70 @@ def generate_all_rpn_with_if(max_tokens: int):
         exprs = get_expressions(n, allow_if)
         total_exprs = len(exprs)
         
-        # Print header for this token count
         print(f"\nSearching {total_exprs:,} expressions with {n} token(s)...", end='', flush=True)
         
         for i, expr in enumerate(exprs, 1):
-            # Update progress on same line
             print(f'\r  Progress: {i:,}/{total_exprs:,} ({100*i//total_exprs}%)', end='', flush=True)
             yield n, expr
         
-        # Clear the progress line after completing this token count
+        # Clear cache for this level to free memory (keep only current and next level)
+        old_key = (n, False)
+        if old_key in cache:
+            del cache[old_key]
+        old_key = (n, True)
+        if old_key in cache:
+            del cache[old_key]
+        
         print('\r' + ' ' * 60 + '\r', end='', flush=True)
 
-def check_expression(tokens: List[Token]) -> bool:
+def check_expression(tokens) -> bool:
     """Check if expression matches target for all yy in 0..99.
     
-    Uses two-phase verification:
-    1. First check a few sample values (quick rejection)
+    Uses two-phase verification with precomputed target values:
+    1. First check critical boundary values (quick rejection)
     2. If samples pass, check all values 0..99
     """
-    # Phase 1: Quick check with critical boundary values only
-    critical_values = [0, 3, 4, 7, 8, 11, 15, 19, 20, 39, 40, 59, 60, 79, 80, 99]
-    
-    for yy in critical_values:
+    # Phase 1: Quick check with critical boundary values
+    for yy in CRITICAL_INDICES:
         result = evaluate_rpn(tokens, yy)
         if result is None:
             return False
-        expected = target_function(yy)
-        # Normalize result to be in range [0, 6]
-        result_mod = result % 7
-        if result_mod != expected:
+        if (result % 7) != TARGET_VALUES[yy]:
             return False
     
     # Phase 2: Full check with all values 0..99
-    for yy in range(100):
+    for yy in YY_VALUES:
         result = evaluate_rpn(tokens, yy)
         if result is None:
             return False
-        expected = target_function(yy)
-        # Normalize result to be in range [0, 6]
-        result_mod = result % 7
-        if result_mod != expected:
+        if (result % 7) != TARGET_VALUES[yy]:
             return False
     
     return True
 
-def tokens_to_string(tokens: List[Token]) -> str:
+def tokens_to_string(tokens) -> str:
     """Convert tokens to human-readable string."""
+    op_names = ['+', '-', '*', '//', '%']
     parts = []
-    for token in tokens:
-        if token.token_type == TokenType.CONST:
-            parts.append(str(token.value))
-        elif token.token_type == TokenType.VAR_YY:
+    for ttype, tval in tokens:
+        if ttype == CONST:
+            parts.append(str(tval))
+        elif ttype == VAR_YY:
             parts.append('yy')
-        elif token.token_type == TokenType.VAR_A:
+        elif ttype == VAR_A:
             parts.append('a')
-        elif token.token_type == TokenType.VAR_B:
+        elif ttype == VAR_B:
             parts.append('b')
-        elif token.token_type == TokenType.UNARY_MINUS:
+        elif ttype == UNARY_MINUS:
             parts.append('neg')
-        elif token.token_type == TokenType.BINARY_OP:
-            parts.append(str(token.value))
-        elif token.token_type == TokenType.IF_THEN_ELSE:
-            cond, then_b, else_b = token.value
-            cond_str = tokens_to_string(cond)
-            then_str = tokens_to_string(then_b)
-            else_str = tokens_to_string(else_b)
-            parts.append(f'IF({cond_str})THEN({then_str})ELSE({else_str})')
-        elif token.token_type == TokenType.IF_THEN:
-            cond, then_b = token.value
-            cond_str = tokens_to_string(cond)
-            then_str = tokens_to_string(then_b)
-            parts.append(f'IF({cond_str})THEN({then_str})')
+        elif ttype == BINARY_OP:
+            parts.append(op_names[tval])
+        elif ttype == IF_THEN_ELSE:
+            cond, then_b, else_b = tval
+            parts.append(f'IF({tokens_to_string(cond)})THEN({tokens_to_string(then_b)})ELSE({tokens_to_string(else_b)})')
+        elif ttype == IF_THEN:
+            cond, then_b = tval
+            parts.append(f'IF({tokens_to_string(cond)})THEN({tokens_to_string(then_b)})')
     return ' '.join(parts)
 
 def main():
@@ -622,13 +537,12 @@ def main():
     print("=" * 70)
     
     found_solutions = []
-    max_tokens = 10  # Search up to this many tokens
-    min_solution_tokens = None  # Track minimum token count for found solutions
+    max_tokens = 10
+    min_solution_tokens = None
     
     start_time = time.time()
     
     for num_tokens, tokens in generate_all_rpn_with_if(max_tokens):
-        # If we've found solutions and this is significantly larger, stop
         if min_solution_tokens is not None and num_tokens > min_solution_tokens + 2:
             break
         
@@ -643,11 +557,11 @@ def main():
             print(f"\n✓ Found solution with {num_tokens} tokens (in {elapsed:.1f}s):")
             print(f"  {expr_str}")
             
-            # Verify a few values
+            # Verify a few values using precomputed target values
             print("  Verification:")
             for yy in [0, 1, 10, 25, 50, 99]:
                 result = evaluate_rpn(tokens, yy) % 7
-                expected = target_function(yy)
+                expected = TARGET_VALUES[yy]
                 print(f"    yy={yy:2d}: result={result}, expected={expected}, match={result==expected}")
             
             # Stop after finding first 10 solutions at minimum complexity
@@ -666,7 +580,7 @@ def main():
         print("\nBest solutions (minimum tokens):")
         min_tokens = min(s[0] for s in found_solutions)
         best_solutions = [s for s in found_solutions if s[0] == min_tokens]
-        for num_tok, expr_str, _ in best_solutions[:10]:  # Show up to 10 best
+        for num_tok, expr_str, _ in best_solutions[:10]:
             print(f"  [{num_tok} tokens] {expr_str}")
         
         if len(best_solutions) > 10:
