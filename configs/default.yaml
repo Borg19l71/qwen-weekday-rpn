@@ -1,0 +1,44 @@
+# RPN Search Configuration
+
+# Constants range (0 to CONSTANT_MAX inclusive)
+constant_max: 20
+
+# Test range for yy values
+yy_test_min: 0
+yy_test_max: 99
+
+# Sample values for quick verification
+sample_values:
+  - 0
+  - 1
+  - 7
+  - 15
+  - 23
+  - 50
+  - 77
+  - 99
+
+# Modulus for result normalization
+modulus: 7
+
+# Search parameters
+search:
+  default_max_tokens: 10
+  default_max_solutions: 10
+  
+# Available operators
+operators:
+  binary:
+    - "+"
+    - "-"
+    - "*"
+    - "//"
+    - "%"
+  unary:
+    - "neg"
+
+# Variables
+variables:
+  - yy    # Input value (0-99)
+  - a     # Tens digit
+  - b     # Ones digit
