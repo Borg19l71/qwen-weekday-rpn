@@ -355,7 +355,26 @@ def generate_all_rpn_with_if(max_tokens: int):
             yield n, expr
 
 def check_expression(tokens: List[Token]) -> bool:
-    """Check if expression matches target for all yy in 0..99."""
+    """Check if expression matches target for all yy in 0..99.
+    
+    Uses two-phase verification:
+    1. First check a few sample values (quick rejection)
+    2. If samples pass, check all values 0..99
+    """
+    # Phase 1: Quick check with sample values
+    sample_values = [0, 1, 7, 15, 23, 50, 77, 99]
+    
+    for yy in sample_values:
+        result = evaluate_rpn(tokens, yy)
+        if result is None:
+            return False
+        expected = target_function(yy)
+        # Normalize result to be in range [0, 6]
+        result_mod = result % 7
+        if result_mod != expected:
+            return False
+    
+    # Phase 2: Full check with all values 0..99
     for yy in range(100):
         result = evaluate_rpn(tokens, yy)
         if result is None:
@@ -365,6 +384,7 @@ def check_expression(tokens: List[Token]) -> bool:
         result_mod = result % 7
         if result_mod != expected:
             return False
+    
     return True
 
 def tokens_to_string(tokens: List[Token]) -> str:
@@ -380,7 +400,7 @@ def tokens_to_string(tokens: List[Token]) -> str:
         elif token.token_type == TokenType.VAR_B:
             parts.append('b')
         elif token.token_type == TokenType.UNARY_MINUS:
-            parts.append('-')
+            parts.append('neg')
         elif token.token_type == TokenType.BINARY_OP:
             parts.append(str(token.value))
         elif token.token_type == TokenType.IF_THEN_ELSE:
