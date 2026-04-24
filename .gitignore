@@ -6,9 +6,9 @@ __pycache__/
 *.pyd
 
 # Environment
-.venv/
-venv/
-env/
+.env
+.env.local
+*.env.*
 
 # Logs
 *.log
@@ -16,14 +16,23 @@ env/
 # Temporary files
 *.tmp
 *.swp
-*~
+*.swo
 
-# OS generated files
+# Dependencies
+.venv/
+venv/
+node_modules/
+
+# Build artifacts
+dist/
+build/
+target/
+
+# Editors
+.vscode/
+.idea/
+
+# OS
 .DS_Store
 Thumbs.db
-
-# Local configuration
-.env
-.env.local
-*.env.*
 ```

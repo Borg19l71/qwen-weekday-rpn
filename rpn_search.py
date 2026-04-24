@@ -22,6 +22,7 @@ class TokenType:
     UNARY_MINUS = 'UNARY_MINUS'
     BINARY_OP = 'BINARY_OP'
     IF_THEN_ELSE = 'IF_THEN_ELSE'
+    IF_THEN = 'IF_THEN'  # IF-THEN without ELSE (returns 0 if condition is false)
 
 class Token:
     def __init__(self, token_type: str, value: Optional[Union[str, int]] = None):
@@ -109,6 +110,24 @@ def evaluate_rpn(tokens: List[Token], yy: int) -> Optional[int]:
             if branch_result is None:
                 return None
             stack.append(branch_result)
+        elif token.token_type == TokenType.IF_THEN:
+            # Format: IF (condition_tokens) THEN (then_tokens)
+            # If condition is true: execute then_branch and push result
+            # If condition is false: do NOTHING (no stack change)
+            cond_tokens, then_tokens = token.value
+            
+            # Evaluate condition
+            cond_result = evaluate_rpn(cond_tokens, yy)
+            if cond_result is None:
+                return None
+            
+            # In Python, any non-zero value is truthy
+            if cond_result != 0:
+                branch_result = evaluate_rpn(then_tokens, yy)
+                if branch_result is None:
+                    return None
+                stack.append(branch_result)
+            # else: condition is false - do nothing, no stack change
         
         i += 1
     
@@ -170,6 +189,15 @@ def is_valid_rpn_sequence(tokens: List[Token]) -> bool:
             if not is_valid_rpn_sequence(else_tokens):
                 return False
             # Each branch must leave exactly one value
+            stack_size += 1
+        elif token.token_type == TokenType.IF_THEN:
+            # IF THEN (without ELSE) consumes nothing from outer stack, produces 1
+            # Returns 0 if condition is false
+            cond_tokens, then_tokens = token.value
+            if not is_valid_rpn_sequence(cond_tokens):
+                return False
+            if not is_valid_rpn_sequence(then_tokens):
+                return False
             stack_size += 1
     
     return stack_size == 1
@@ -296,6 +324,24 @@ def generate_all_rpn_with_if(max_tokens: int):
                                 for ee in else_exprs:
                                     if_token = Token(TokenType.IF_THEN_ELSE, (ce, te, ee))
                                     exprs.append([if_token])
+            
+            # IF-THEN (without ELSE) structures
+            if allow_if and n >= 4:  # Minimum: 1 cond + 1 then + structure overhead
+                # IF THEN takes 1 token itself, plus tokens for condition and then branch
+                # Total = cond_tokens + then_tokens + 1 (for IF token)
+                # So: cond + then = n - 1
+                for cond_size in range(1, n - 1):
+                    then_size = n - 1 - cond_size
+                    if then_size < 1:
+                        continue
+                    
+                    cond_exprs = get_expressions(cond_size, False)  # No nesting for now
+                    then_exprs = get_expressions(then_size, False)
+                    
+                    for ce in cond_exprs:
+                        for te in then_exprs:
+                            if_token = Token(TokenType.IF_THEN, (ce, te))
+                            exprs.append([if_token])
         
         if n not in cache or cache[n][0] != allow_if:
             cache[n] = (allow_if, exprs)
@@ -343,6 +389,11 @@ def tokens_to_string(tokens: List[Token]) -> str:
             then_str = tokens_to_string(then_b)
             else_str = tokens_to_string(else_b)
             parts.append(f'IF({cond_str})THEN({then_str})ELSE({else_str})')
+        elif token.token_type == TokenType.IF_THEN:
+            cond, then_b = token.value
+            cond_str = tokens_to_string(cond)
+            then_str = tokens_to_string(then_b)
+            parts.append(f'IF({cond_str})THEN({then_str})')
     return ' '.join(parts)
 
 def main():
