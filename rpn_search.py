@@ -548,8 +548,18 @@ def generate_all_rpn_with_if(max_tokens: int):
     for n in range(1, max_tokens + 1):
         allow_if = (n >= 5)
         exprs = get_expressions(n, allow_if)
-        for expr in exprs:
+        total_exprs = len(exprs)
+        
+        # Print header for this token count
+        print(f"\nSearching {total_exprs:,} expressions with {n} token(s)...", end='', flush=True)
+        
+        for i, expr in enumerate(exprs, 1):
+            # Update progress on same line
+            print(f'\r  Progress: {i:,}/{total_exprs:,} ({100*i//total_exprs}%)', end='', flush=True)
             yield n, expr
+        
+        # Clear the progress line after completing this token count
+        print('\r' + ' ' * 60 + '\r', end='', flush=True)
 
 def check_expression(tokens: List[Token]) -> bool:
     """Check if expression matches target for all yy in 0..99.
