@@ -52,6 +52,80 @@ def generate_binary_ops() -> List[Token]:
     return [get_cached_token(TokenType.BINARY_OP, op) for op in ops]
 
 
+def can_use_div_mod_operator(last_token: Token) -> bool:
+    """
+    Check if // or % operator can be used based on the last token.
+    
+    The // and % operators are only valid when the token immediately 
+    before them is a constant >= 2.
+    
+    Args:
+        last_token: The last token before the // or % operator
+        
+    Returns:
+        True if // or % can be used, False otherwise
+    """
+    if last_token is None:
+        return False
+    
+    # Only allow if last token is a constant >= 2
+    if last_token.token_type == TokenType.CONST and last_token.value >= 2:
+        return True
+    
+    return False
+
+
+def get_last_terminal_token(tokens: List[Token]) -> Token:
+    """
+    Get the last terminal token (rightmost leaf) in an expression.
+    
+    For simple tokens, returns the token itself.
+    For IF-THEN-ELSE tokens, recursively finds the last token in the else branch.
+    
+    Args:
+        tokens: List of tokens representing an expression
+        
+    Returns:
+        The last terminal token, or None if not found
+    """
+    if not tokens:
+        return None
+    
+    # Start from the last token
+    token = tokens[-1]
+    
+    # If it's a simple token (CONST, VAR, BINARY_OP, UNARY_MINUS), we need to look deeper
+    # Actually, for RPN, the last token in the list IS the operator for binary ops
+    # We need to find the rightmost operand
+    
+    # For IF_THEN_ELSE, the structure is [IF_token] where IF_token.value = (cond, then, else)
+    if token.token_type == TokenType.IF_THEN_ELSE:
+        cond_expr, then_expr, else_expr = token.value
+        # Recursively get last token from else branch (it's evaluated last)
+        return get_last_terminal_token(else_expr)
+    
+    if token.token_type == TokenType.IF_THEN:
+        cond_expr, then_expr = token.value
+        return get_last_terminal_token(then_expr)
+    
+    # For BINARY_OP, the last token in the flat list is the operator itself
+    # We need to find the last token of the second operand
+    # But since we're working with a flat RPN list, we need to evaluate which tokens form E2
+    # This is complex, so let's use a simpler approach: scan backwards to find first non-operator
+    
+    # Scan backwards to find the last operand token
+    for t in reversed(tokens):
+        if t.token_type in [TokenType.CONST, TokenType.VAR_YY, TokenType.VAR_A, TokenType.VAR_B]:
+            return t
+        elif t.token_type == TokenType.UNARY_MINUS:
+            continue  # Skip unary minus, keep looking
+        elif t.token_type in [TokenType.BINARY_OP, TokenType.IF_THEN_ELSE, TokenType.IF_THEN]:
+            # Operators don't count as terminal tokens
+            continue
+    
+    return None
+
+
 def generate_all_rpn_with_if(max_tokens: int) -> Generator[Tuple[int, List[Token]], None, None]:
     """
     Generate RPN expressions including IF-THEN-ELSE structures.
@@ -107,7 +181,14 @@ def generate_all_rpn_with_if(max_tokens: int) -> Generator[Tuple[int, List[Token
                 
                 for e1 in exprs1:
                     for e2 in exprs2:
+                        # Check if we can use // or % operators based on the last token of E2
+                        last_token_of_e2 = get_last_terminal_token(e2)
+                        allow_div_mod = can_use_div_mod_operator(last_token_of_e2)
+                        
                         for op in binary_ops:
+                            # Skip // and % if not allowed
+                            if op.value in ['//', '%'] and not allow_div_mod:
+                                continue
                             exprs.append(e1 + e2 + [op])
             
             # Unary operations: E = E1 UNARY_MINUS
