@@ -44,6 +44,7 @@ def evaluate_rpn(tokens: List[Token], yy: int) -> Optional[int]:
     """
     Evaluate RPN expression for given yy value.
     Returns None if evaluation fails (stack underflow, division by zero, etc.)
+    or if final stack doesn't have exactly one value.
     """
     stack = []
     yy_val, a, b = get_variables(yy)
@@ -96,38 +97,46 @@ def evaluate_rpn(tokens: List[Token], yy: int) -> Optional[int]:
             # The token value contains nested token lists
             cond_tokens, then_tokens, else_tokens = token.value
             
-            # Evaluate condition
-            cond_result = evaluate_rpn(cond_tokens, yy)
+            # Evaluate condition (must produce exactly one value)
+            cond_stack = stack.copy()
+            cond_result = evaluate_rpn_internal(cond_tokens, yy, cond_stack)
             if cond_result is None:
                 return None
             
             # In Python, any non-zero value is truthy
             if cond_result != 0:
-                branch_result = evaluate_rpn(then_tokens, yy)
+                branch_result = evaluate_rpn_internal(then_tokens, yy, stack)
             else:
-                branch_result = evaluate_rpn(else_tokens, yy)
+                branch_result = evaluate_rpn_internal(else_tokens, yy, stack)
             
             if branch_result is None:
                 return None
-            stack.append(branch_result)
+            # Branch result should be the top of stack after evaluation
+            # The branch replaces the condition value(s) with its own output
         elif token.token_type == TokenType.IF_THEN:
             # Format: IF (condition_tokens) THEN (then_tokens)
-            # If condition is true: execute then_branch and push result
+            # If condition is true: execute then_branch
             # If condition is false: do NOTHING (no stack change)
             cond_tokens, then_tokens = token.value
             
-            # Evaluate condition
-            cond_result = evaluate_rpn(cond_tokens, yy)
+            # Save current stack state
+            saved_stack = stack.copy()
+            
+            # Evaluate condition on a copy to check validity
+            cond_stack = stack.copy()
+            cond_result = evaluate_rpn_internal(cond_tokens, yy, cond_stack)
             if cond_result is None:
                 return None
             
             # In Python, any non-zero value is truthy
             if cond_result != 0:
-                branch_result = evaluate_rpn(then_tokens, yy)
+                # Condition is true - execute then branch
+                # Restore original stack before executing then branch
+                branch_result = evaluate_rpn_internal(then_tokens, yy, stack)
                 if branch_result is None:
                     return None
-                stack.append(branch_result)
-            # else: condition is false - do nothing, no stack change
+                # Then branch result is now on stack
+            # else: condition is false - restore original stack (already there)
         
         i += 1
     
@@ -135,6 +144,84 @@ def evaluate_rpn(tokens: List[Token], yy: int) -> Optional[int]:
         return None
     
     return stack[0]
+
+def evaluate_rpn_internal(tokens: List[Token], yy: int, stack: List[int]) -> Optional[int]:
+    """
+    Internal RPN evaluation that works on an existing stack.
+    Returns the top of stack after evaluation, or None if failed.
+    """
+    yy_val, a, b = get_variables(yy)
+    
+    for token in tokens:
+        if token.token_type == TokenType.CONST:
+            stack.append(token.value)
+        elif token.token_type == TokenType.VAR_YY:
+            stack.append(yy_val)
+        elif token.token_type == TokenType.VAR_A:
+            stack.append(a)
+        elif token.token_type == TokenType.VAR_B:
+            stack.append(b)
+        elif token.token_type == TokenType.UNARY_MINUS:
+            if len(stack) < 1:
+                return None
+            val = stack.pop()
+            stack.append(-val)
+        elif token.token_type == TokenType.BINARY_OP:
+            if len(stack) < 2:
+                return None
+            b_val = stack.pop()
+            a_val = stack.pop()
+            op = token.value
+            
+            try:
+                if op == '+':
+                    stack.append(a_val + b_val)
+                elif op == '-':
+                    stack.append(a_val - b_val)
+                elif op == '*':
+                    stack.append(a_val * b_val)
+                elif op == '//':
+                    if b_val == 0:
+                        return None
+                    stack.append(a_val // b_val)
+                elif op == '%':
+                    if b_val == 0:
+                        return None
+                    stack.append(a_val % b_val)
+            except (ZeroDivisionError, OverflowError):
+                return None
+        elif token.token_type == TokenType.IF_THEN_ELSE:
+            cond_tokens, then_tokens, else_tokens = token.value
+            
+            cond_result = evaluate_rpn_internal(cond_tokens, yy, stack)
+            if cond_result is None:
+                return None
+            
+            if cond_result != 0:
+                branch_result = evaluate_rpn_internal(then_tokens, yy, stack)
+            else:
+                branch_result = evaluate_rpn_internal(else_tokens, yy, stack)
+            
+            if branch_result is None:
+                return None
+        elif token.token_type == TokenType.IF_THEN:
+            cond_tokens, then_tokens = token.value
+            
+            saved_stack = stack.copy()
+            cond_result = evaluate_rpn_internal(cond_tokens, yy, stack)
+            if cond_result is None:
+                return None
+            
+            if cond_result != 0:
+                branch_result = evaluate_rpn_internal(then_tokens, yy, stack)
+                if branch_result is None:
+                    return None
+            # else: false - stack already restored conceptually (we didn't modify it yet)
+    
+    if len(stack) < 1:
+        return None
+    
+    return stack[-1]
 
 def generate_simple_tokens():
     """Generate simple tokens (constants and variables)."""
@@ -160,10 +247,80 @@ def generate_binary_ops():
     ops = ['+', '-', '*', '//', '%']
     return [Token(TokenType.BINARY_OP, op) for op in ops]
 
-def is_valid_rpn_sequence(tokens: List[Token]) -> bool:
+def get_stack_effect(tokens: List[Token]) -> Optional[int]:
+    """
+    Calculate the net stack effect of a token sequence.
+    Returns None if the sequence is invalid.
+    Positive means values pushed, negative means values popped.
+    """
+    stack_size = 0
+    min_stack_size = 0
+    
+    for token in tokens:
+        if token.token_type in [TokenType.CONST, TokenType.VAR_YY, TokenType.VAR_A, TokenType.VAR_B]:
+            stack_size += 1
+        elif token.token_type == TokenType.UNARY_MINUS:
+            if stack_size < 1:
+                return None
+            # Consumes 1, produces 1, net effect 0
+        elif token.token_type == TokenType.BINARY_OP:
+            if stack_size < 2:
+                return None
+            stack_size -= 1  # Consumes 2, produces 1, net effect -1
+        elif token.token_type == TokenType.IF_THEN_ELSE:
+            cond_tokens, then_tokens, else_tokens = token.value
+            cond_effect = get_stack_effect(cond_tokens)
+            then_effect = get_stack_effect(then_tokens)
+            else_effect = get_stack_effect(else_tokens)
+            
+            if cond_effect is None or then_effect is None or else_effect is None:
+                return None
+            
+            # Condition must leave exactly one value on stack
+            if cond_effect != 1:
+                return None
+            
+            # THEN and ELSE must have the same stack effect
+            if then_effect != else_effect:
+                return None
+            
+            # Net effect: condition consumes nothing from outer, produces 1
+            # Then branch replaces that 1 with then_effect values
+            # So net effect is then_effect
+            stack_size += then_effect
+        elif token.token_type == TokenType.IF_THEN:
+            cond_tokens, then_tokens = token.value
+            cond_effect = get_stack_effect(cond_tokens)
+            then_effect = get_stack_effect(then_tokens)
+            
+            if cond_effect is None or then_effect is None:
+                return None
+            
+            # Condition must leave exactly one value on stack
+            if cond_effect != 1:
+                return None
+            
+            # IF-THEN: if true, pushes then_effect values; if false, no change (effect 0)
+            # For validation, we consider the maximum possible effect
+            # But actually we need to ensure the expression is valid in both cases
+            # The net effect when true is then_effect, when false is 0
+            # We'll track this specially - for now just check validity
+            pass  # IF-THEN doesn't have a fixed stack effect
+    
+    return stack_size
+
+def is_valid_rpn_sequence(tokens: List[Token], allow_multi_result: bool = False) -> bool:
     """
     Check if a token sequence can form a valid RPN expression.
     Uses stack-based validation.
+    
+    Args:
+        tokens: List of tokens to validate
+        allow_multi_result: If True, allows final stack size > 1 (used for IF branch validation)
+    
+    For simple expressions (no IF-THEN), final stack must be exactly 1.
+    For IF-THEN expressions, final stack can be >= 0 depending on condition.
+    For IF branches being validated internally, any stack size >= 0 is allowed.
     """
     stack_size = 0
     
@@ -179,28 +336,68 @@ def is_valid_rpn_sequence(tokens: List[Token]) -> bool:
                 return False
             stack_size -= 1  # Consumes 2, produces 1
         elif token.token_type == TokenType.IF_THEN_ELSE:
-            # IF THEN ELSE consumes nothing from outer stack, produces 1
-            # But internally it has nested structures that must be valid
+            # IF THEN ELSE consumes nothing from outer stack, produces result of branches
             cond_tokens, then_tokens, else_tokens = token.value
             if not is_valid_rpn_sequence(cond_tokens):
                 return False
-            if not is_valid_rpn_sequence(then_tokens):
+            # Branches can have multi-result
+            if not is_valid_rpn_sequence(then_tokens, allow_multi_result=True):
                 return False
-            if not is_valid_rpn_sequence(else_tokens):
+            if not is_valid_rpn_sequence(else_tokens, allow_multi_result=True):
                 return False
-            # Each branch must leave exactly one value
-            stack_size += 1
+            
+            # Get stack effects of branches
+            then_effect = get_stack_effect(then_tokens)
+            else_effect = get_stack_effect(else_tokens)
+            
+            # Both branches must be valid and have same effect
+            if then_effect is None or else_effect is None:
+                return False
+            if then_effect != else_effect:
+                return False
+            
+            # Each branch must leave at least one value (for the overall expression to produce output)
+            if then_effect < 1:
+                return False
+                
+            stack_size += then_effect
         elif token.token_type == TokenType.IF_THEN:
-            # IF THEN (without ELSE) consumes nothing from outer stack, produces 1
-            # Returns 0 if condition is false
+            # IF THEN (without ELSE)
             cond_tokens, then_tokens = token.value
             if not is_valid_rpn_sequence(cond_tokens):
                 return False
-            if not is_valid_rpn_sequence(then_tokens):
+            # Then branch can have multi-result
+            if not is_valid_rpn_sequence(then_tokens, allow_multi_result=True):
                 return False
-            stack_size += 1
+            
+            # Condition must produce exactly one value
+            cond_effect = get_stack_effect(cond_tokens)
+            if cond_effect is None or cond_effect != 1:
+                return False
+            
+            # Then branch can have any non-negative effect
+            then_effect = get_stack_effect(then_tokens)
+            if then_effect is None or then_effect < 0:
+                return False
+            
+            # IF-THEN doesn't guarantee a fixed stack size since false case = no change
+            # We don't add anything to stack_size here
+            pass
     
-    return stack_size == 1
+    # For expressions without IF-THEN, must end with exactly 1 value (unless allow_multi_result)
+    # For expressions with IF-THEN or IF-THEN-ELSE, we need special handling
+    has_if_then = any(t.token_type == TokenType.IF_THEN for t in tokens)
+    has_if_then_else = any(t.token_type == TokenType.IF_THEN_ELSE for t in tokens)
+    
+    if has_if_then or has_if_then_else:
+        # IF expressions are valid if they don't underflow
+        # The actual result depends on runtime condition
+        return True
+    elif allow_multi_result:
+        # Allow any non-negative stack size
+        return stack_size >= 0
+    else:
+        return stack_size == 1
 
 def generate_rpn_expressions(num_tokens: int, use_if_then_else: bool = False):
     """
