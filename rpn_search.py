@@ -6,8 +6,9 @@ for all yy in range 0..99, using increasing complexity (number of tokens).
 """
 
 from itertools import product
-from typing import List, Tuple, Optional, Union
+from typing import List, Tuple, Optional, Union, Callable
 import sys
+import time
 
 # Target function: (yy + yy//4) % 7
 def target_function(yy: int) -> int:
@@ -45,54 +46,49 @@ def evaluate_rpn(tokens: List[Token], yy: int) -> Optional[int]:
     Evaluate RPN expression for given yy value.
     Returns None if evaluation fails (stack underflow, division by zero, etc.)
     or if final stack doesn't have exactly one value.
+    Optimized for speed with local variable caching and minimal lookups.
     """
     stack = []
     yy_val, a, b = get_variables(yy)
     
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
+    # Cache token attributes to avoid repeated attribute lookups
+    for token in tokens:
+        ttype = token.token_type
+        tval = token.value
         
-        if token.token_type == TokenType.CONST:
-            stack.append(token.value)
-        elif token.token_type == TokenType.VAR_YY:
+        if ttype == 'CONST':
+            stack.append(tval)
+        elif ttype == 'VAR_YY':
             stack.append(yy_val)
-        elif token.token_type == TokenType.VAR_A:
+        elif ttype == 'VAR_A':
             stack.append(a)
-        elif token.token_type == TokenType.VAR_B:
+        elif ttype == 'VAR_B':
             stack.append(b)
-        elif token.token_type == TokenType.UNARY_MINUS:
+        elif ttype == 'UNARY_MINUS':
             if len(stack) < 1:
                 return None
-            val = stack.pop()
-            stack.append(-val)
-        elif token.token_type == TokenType.BINARY_OP:
+            stack[-1] = -stack[-1]
+        elif ttype == 'BINARY_OP':
             if len(stack) < 2:
                 return None
             b_val = stack.pop()
             a_val = stack.pop()
-            op = token.value
             
-            try:
-                if op == '+':
-                    stack.append(a_val + b_val)
-                elif op == '-':
-                    stack.append(a_val - b_val)
-                elif op == '*':
-                    stack.append(a_val * b_val)
-                elif op == '//':
-                    if b_val == 0:
-                        return None
-                    # Python's // with negative numbers can give unexpected results
-                    # We need to handle this carefully for modulo arithmetic
-                    stack.append(a_val // b_val)
-                elif op == '%':
-                    if b_val == 0:
-                        return None
-                    stack.append(a_val % b_val)
-            except (ZeroDivisionError, OverflowError):
-                return None
-        elif token.token_type == TokenType.IF_THEN_ELSE:
+            if tval == '+':
+                stack.append(a_val + b_val)
+            elif tval == '-':
+                stack.append(a_val - b_val)
+            elif tval == '*':
+                stack.append(a_val * b_val)
+            elif tval == '//':
+                if b_val == 0:
+                    return None
+                stack.append(a_val // b_val)
+            elif tval == '%':
+                if b_val == 0:
+                    return None
+                stack.append(a_val % b_val)
+        elif ttype == 'IF_THEN_ELSE':
             # Format: IF (condition_tokens) THEN (then_tokens) ELSE (else_tokens)
             # The token value contains nested token lists
             cond_tokens, then_tokens, else_tokens = token.value
@@ -113,7 +109,7 @@ def evaluate_rpn(tokens: List[Token], yy: int) -> Optional[int]:
                 return None
             # Branch result should be the top of stack after evaluation
             # The branch replaces the condition value(s) with its own output
-        elif token.token_type == TokenType.IF_THEN:
+        elif ttype == 'IF_THEN':
             # Format: IF (condition_tokens) THEN (then_tokens)
             # If condition is true: execute then_branch
             # If condition is false: do NOTHING (no stack change)
@@ -137,8 +133,6 @@ def evaluate_rpn(tokens: List[Token], yy: int) -> Optional[int]:
                     return None
                 # Then branch result is now on stack
             # else: condition is false - restore original stack (already there)
-        
-        i += 1
     
     if len(stack) != 1:
         return None
@@ -568,10 +562,10 @@ def check_expression(tokens: List[Token]) -> bool:
     1. First check a few sample values (quick rejection)
     2. If samples pass, check all values 0..99
     """
-    # Phase 1: Quick check with sample values
-    sample_values = [0, 1, 7, 15, 23, 50, 77, 99]
+    # Phase 1: Quick check with critical boundary values only
+    critical_values = [0, 3, 4, 7, 8, 11, 15, 19, 20, 39, 40, 59, 60, 79, 80, 99]
     
-    for yy in sample_values:
+    for yy in critical_values:
         result = evaluate_rpn(tokens, yy)
         if result is None:
             return False
@@ -631,6 +625,8 @@ def main():
     max_tokens = 10  # Search up to this many tokens
     min_solution_tokens = None  # Track minimum token count for found solutions
     
+    start_time = time.time()
+    
     for num_tokens, tokens in generate_all_rpn_with_if(max_tokens):
         # If we've found solutions and this is significantly larger, stop
         if min_solution_tokens is not None and num_tokens > min_solution_tokens + 2:
@@ -643,7 +639,8 @@ def main():
             if min_solution_tokens is None:
                 min_solution_tokens = num_tokens
             
-            print(f"\n✓ Found solution with {num_tokens} tokens:")
+            elapsed = time.time() - start_time
+            print(f"\n✓ Found solution with {num_tokens} tokens (in {elapsed:.1f}s):")
             print(f"  {expr_str}")
             
             # Verify a few values
@@ -658,12 +655,14 @@ def main():
                 if len([s for s in found_solutions if s[0] == min_solution_tokens]) >= 10:
                     break
     
+    total_time = time.time() - start_time
+    
     if not found_solutions:
         print("\nNo solutions found up to", max_tokens, "tokens.")
         print("Try increasing max_tokens or checking the search logic.")
     else:
         print("\n" + "=" * 70)
-        print(f"Found {len(found_solutions)} solution(s)")
+        print(f"Found {len(found_solutions)} solution(s) in {total_time:.1f} seconds")
         print("\nBest solutions (minimum tokens):")
         min_tokens = min(s[0] for s in found_solutions)
         best_solutions = [s for s in found_solutions if s[0] == min_tokens]
